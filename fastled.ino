@@ -1,7 +1,8 @@
 #include <FastLED.h>
-#define HOUR_PIN    8 // time setting input
-#define MINUTE_PIN  9 // time setting input
-#define SECOND_PIN  10 // time setting input
+
+#include "RTClib.h"
+static RTC_DS3231 rtc;
+
 #define LED_PIN     5
 #define NUM_LEDS    180
 #define BRIGHTNESS  16  // 64
@@ -9,130 +10,109 @@
 #define COLOR_ORDER GRB
 // MILLI_PER_SEC should be 1000, but smaller numbers make debugging easier/more interesting.
 #define MILLIS_PER_SEC 1000
-CRGB leds[NUM_LEDS];
+static CRGB leds[NUM_LEDS];
+static CRGB leds_static[NUM_LEDS];
 #define UPDATES_PER_SECOND 1
 TBlendType    currentBlending;
 extern CRGBPalette16 myRedWhiteBluePalette;
 extern const TProgmemPalette16 myRedWhiteBluePalette_p PROGMEM;
-uint8_t hour, minute, second, change_hour, change_minute, change_second;
-unsigned long lastupdate, now;
+
+static void set_static_leds (void)
+{
+    int i;
+
+    for (i = 0; i < NUM_LEDS; ++i) {
+        leds_static[i] = CRGB::Black;
+    }
+    for (i = 0; i < 60; i += 5) { // hour markers
+        leds_static[pos(i)].red   = 255;
+        leds_static[pos(i)].green = 255;
+        leds_static[pos(i)].blue  = 255;
+    }
+}
+
+// adjust led index if it wraps around
+//
+static uint8_t canon (int index)
+{
+    index %= NUM_LEDS;
+    return index < 0
+        ? index+NUM_LEDS
+        : index;
+}
+
+#define LEDS_CCW  1
+
+// map logical led (60) to physical led (NUM_LEDS)
+//
+static int pos (int led)
+{
+    led *= NUM_LEDS / 60;
+    return LEDS_CCW
+        ? (NUM_LEDS-1) - led
+        : led;
+}
+
+static int blink_intensity  = 0;
+
+static void new_time (uint8_t hour, uint8_t minute, uint8_t second)
+{
+    int hourled;
+
+    memcpy (leds, leds_static, sizeof(leds));
+   
+    hourled   = hour * 5 + minute/12;
+    leds[canon(pos(hourled)-1)].red = 255-blink_intensity;  // maybe use leds[] += CRGB::Red ?
+    leds[canon(pos(hourled)  )].red = blink_intensity;
+    leds[canon(pos(hourled)+1)].red = 255-blink_intensity;
+    leds[pos(minute)+ (LEDS_CCW ? -second/20 : second/20)].green = blink_intensity;
+    leds[pos(second)].blue          = 255;
+}
+
 void setup() {
-  int i;
-    Serial.begin(9600);
-    delay( 3000 ); // power-up safety delay
+    Serial.begin(115200);
+    
+    if (! rtc.begin()) {
+        Serial.println("Couldn't find RTC");
+        while (1);
+    }
+
     FastLED.addLeds<LED_TYPE, LED_PIN, COLOR_ORDER>(leds, NUM_LEDS).setCorrection( TypicalLEDStrip );
     FastLED.setBrightness( BRIGHTNESS );
-    pinMode(HOUR_PIN, INPUT);
-    pinMode(MINUTE_PIN, INPUT);
-    pinMode(SECOND_PIN, INPUT);
-    change_hour = change_minute = change_second = 0;
     currentBlending = LINEARBLEND;
-    hour = 9;
-    minute = 0;
-    second = 0;
-    for (i=0; i<NUM_LEDS; i++) {
-        leds[i] = CRGB::Black;
-    }
+
+    set_static_leds ();
+
+    memcpy (leds, leds_static, sizeof(leds));
     FastLED.show();
-    lastupdate = millis() / MILLIS_PER_SEC;
 }
 
-void hexprint(uint8_t val) {
-  if (val < 16) Serial.print('0');
-  Serial.print(val,HEX);
-}
-
-void loop() {
-    check_buttons();
-    now = millis();
-    now /= MILLIS_PER_SEC;
-    if (now != lastupdate) {
-      if (change_hour || change_minute || change_second) {
-        if (change_hour) {
-          hour++;
-          change_hour = 0;
-          Serial.print("Hour changed by button\n");
-        }
-        if (change_minute) {
-          minute++;
-          change_minute = 0;
-          Serial.print("Minute changed by button\n");
-        }
-        if (change_second) {
-          second = 0;
-          change_second = 0;
-          Serial.print("Second changed by button\n");
-        }
-      }
-      second += now-lastupdate;
-      lastupdate = now;
-      if (second >= 60) {
-        minute += second/60;
-        second = second % 60;
-        if (minute >= 60) {
-         hour += minute / 60;
-         minute %= 60;
-         if (hour > 12) {
-             hour -= 12;
-          }
-        }
-      }
-      display_time(hour, minute, second);
-    }
-    delay((unsigned long)(MILLIS_PER_SEC/2));
-}
-
-uint8_t canon(int index) {
-  int return_val = index;
-  if (index < 0) {
-    return_val += NUM_LEDS;
-  } else if (index >= NUM_LEDS) {
-    return_val -= NUM_LEDS;
-  }
-  return return_val;
-}
-
-int pos (int led)
+void loop ()
 {
-//  while (led < 0)
-//    led += 60;
-//  while (led >= 60)
-//    led -= 60;
-  return (NUM_LEDS-1) - led * (NUM_LEDS / 60);
-}
+    blink_intensity = 255 - blink_intensity;
 
-void display_time(uint8_t hour, uint8_t minute, uint8_t second) {
-    int i, hourled;
-    for (i=0; i<NUM_LEDS; i++) {
-        leds[i] = CRGB::Black;
-    }
+//  now = millis() / MILLIS_PER_SEC;	// to be replaced with RTC time
 
-    for (i = 0; i < 60; i += 5) { // hour markers
-        leds[pos(i)].red   = 64;
-        leds[pos(i)].green = 64;
-        leds[pos(i)].blue  = 64;
+    static uint8_t last_hour = 0,
+      last_minute = 0,
+      last_second = 0;
+
+    DateTime now = rtc.now();
+    uint8_t hour   = now.hour();
+    if (hour >= 12) hour -= 12;
+    uint8_t minute = now.minute();
+    uint8_t second = now.second();
+
+    if (second != last_second ||
+        minute != last_minute ||
+        hour   != last_hour) {
+        last_hour   = hour;
+        last_minute = minute;
+        last_second = second;
     }
-   
-    hourled = hour * 5 + minute/12;
-    leds[canon(pos(hourled)-1)].red = 255;
-    leds[canon(pos(hourled)  )].red = 255;
-    leds[canon(pos(hourled)+1)].red = 255;
-    leds[pos(minute)].green = 255;
-    leds[pos(second)].blue  = 255;
-    
+    new_time (hour, minute, second);
     FastLED.show();
+
+    delay ((unsigned long)(MILLIS_PER_SEC/10));	// ?
 }
-void check_buttons() {
-  return;
-  if (digitalRead(HOUR_PIN) == HIGH) {
-    Serial.print("Hour button HIGH\n");
-    change_hour = 1;
-  } else if (digitalRead(MINUTE_PIN) == HIGH) {
-    Serial.print("Minute button HIGH\n");
-    change_minute = 1;
-  } else if (digitalRead(SECOND_PIN) == HIGH) {
-    Serial.print("Second button HIGH\n");
-    change_second = 1;
-  }
-}
- 
+
